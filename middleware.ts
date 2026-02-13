@@ -17,8 +17,7 @@ export function middleware(req: NextRequest) {
 
   const token = req.cookies.get("token")?.value;
 
-  // ✅ ВАЖНО: просто проверяем что токен есть
-  // (не верифицируем JWT в middleware, потому что Edge)
+  // Edge middleware: просто проверяем наличие cookie token
   if (!token) {
     const url = req.nextUrl.clone();
     url.pathname = "/login";

@@ -1,22 +1,35 @@
 import { NextResponse } from "next/server";
-import { verifyToken } from "../../../lib/auth";
+import { dbConnect } from "@/lib/mongoose";
+import { User } from "@/models/User";
+import { verifyToken } from "@/lib/auth";
 
 export async function GET(req: Request) {
   try {
-    const token = req.headers.get("authorization")?.replace("Bearer ", "");
+    const cookie = req.headers.get("cookie") || "";
+    const m = cookie.match(/(?:^|;\s*)token=([^;]+)/);
+    const token = m?.[1];
 
     if (!token) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return NextResponse.json({ ok: false, user: null }, { status: 401 });
     }
 
     const payload = verifyToken(token);
 
-    return NextResponse.json({
-      userId: payload.userId,
-      email: payload.email
-    });
+    await dbConnect();
+    const user = await User.findById(payload.userId).lean();
 
-  } catch {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    if (!user) {
+      return NextResponse.json({ ok: false, user: null }, { status: 401 });
+    }
+
+    return NextResponse.json(
+      {
+        ok: true,
+        user: { id: String(user._id), email: user.email, name: user.name ?? "" },
+      },
+      { status: 200 }
+    );
+  } catch (e) {
+    return NextResponse.json({ ok: false, user: null }, { status: 401 });
   }
 }

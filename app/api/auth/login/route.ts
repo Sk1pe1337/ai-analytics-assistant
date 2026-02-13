@@ -33,7 +33,6 @@ export async function POST(req: Request) {
       { status: 200 }
     );
 
-    // ✅ ВАЖНО: cookie для middleware
     res.cookies.set({
       name: "token",
       value: token,

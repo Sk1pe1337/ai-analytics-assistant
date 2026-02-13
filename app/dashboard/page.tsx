@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
 
@@ -16,10 +16,27 @@ type KpiData = {
   marginPct: number;
   orders: number;
   avgOrder: number;
+
   topProduct: string;
   topProductRevenue: number;
+
   warnings: string[];
   recommendations: string[];
+};
+
+type Health = {
+  score: number; // 0..100
+  label: "Critical" | "At risk" | "Stable" | "Growing";
+  colorCls: string;
+  summary: string;
+  drivers: string[];
+};
+
+type TrendPoint = {
+  label: string; // date bucket
+  revenue: number;
+  cost: number;
+  profit: number;
 };
 
 function clsx(...xs: Array<string | false | undefined | null>) {
@@ -56,8 +73,13 @@ function money(n: number) {
   return v.toLocaleString(undefined, { style: "currency", currency: "USD" });
 }
 
+function clamp(n: number, a: number, b: number) {
+  return Math.max(a, Math.min(b, n));
+}
+
 function suggestColumn(columns: string[], candidates: string[]) {
   const norm = columns.map((c) => ({ raw: c, norm: normalizeKey(c) }));
+
   for (const cand of candidates) {
     const cn = normalizeKey(cand);
     const found = norm.find((x) => x.norm === cn);
@@ -69,6 +91,29 @@ function suggestColumn(columns: string[], candidates: string[]) {
     if (found) return found.raw;
   }
   return "";
+}
+
+function tryParseDate(v: any): Date | null {
+  if (v == null) return null;
+  const s = String(v).trim();
+  if (!s) return null;
+
+  // пробуем ISO / обычный Date
+  const d1 = new Date(s);
+  if (!isNaN(d1.getTime())) return d1;
+
+  // пробуем dd.mm.yyyy / dd/mm/yyyy
+  const m = s.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})$/);
+  if (m) {
+    const dd = Number(m[1]);
+    const mm = Number(m[2]);
+    let yy = Number(m[3]);
+    if (yy < 100) yy += 2000;
+    const d2 = new Date(yy, mm - 1, dd);
+    if (!isNaN(d2.getTime())) return d2;
+  }
+
+  return null;
 }
 
 function computeKpis(params: {
@@ -152,6 +197,103 @@ function computeKpis(params: {
   };
 }
 
+function computeHealth(k: KpiData): Health {
+  const profit = k.profit;
+  const margin = k.marginPct;
+  const costRatio = k.revenue > 0 ? k.cost / k.revenue : 1;
+  const aov = k.avgOrder;
+
+  let score = 50;
+  const drivers: string[] = [];
+
+  if (profit < 0) {
+    score -= 30;
+    drivers.push("Negative profit (loss).");
+  } else {
+    score += 20;
+    drivers.push("Positive profit.");
+  }
+
+  if (margin < 0) {
+    score -= 10;
+    drivers.push("Negative margin.");
+  } else if (margin < 10) {
+    score -= 10;
+    drivers.push("Thin margin (<10%).");
+  } else if (margin < 25) {
+    score += 5;
+    drivers.push("Healthy margin (10–25%).");
+  } else {
+    score += 15;
+    drivers.push("Strong margin (25%+).");
+  }
+
+  if (costRatio > 0.95) {
+    score -= 15;
+    drivers.push("Costs are consuming most revenue.");
+  } else if (costRatio > 0.8) {
+    score -= 5;
+    drivers.push("Costs are relatively high vs revenue.");
+  } else if (costRatio < 0.6) {
+    score += 10;
+    drivers.push("Costs are well-controlled.");
+  }
+
+  if (k.orders >= 200) {
+    score += 5;
+    drivers.push("Sufficient volume for stable signals.");
+  } else if (k.orders < 20) {
+    score -= 5;
+    drivers.push("Low volume (signals may be noisy).");
+  }
+
+  if (aov > 0 && aov < 20) {
+    score -= 3;
+    drivers.push("Low average order value (AOV).");
+  } else if (aov >= 100) {
+    score += 3;
+    drivers.push("High AOV.");
+  }
+
+  score = clamp(Math.round(score), 0, 100);
+
+  let label: Health["label"] = "Stable";
+  let colorCls = "bg-white/5 text-zinc-300 ring-white/10";
+
+  if (score < 35) {
+    label = "Critical";
+    colorCls = "bg-rose-500/15 text-rose-200 ring-rose-500/25";
+  } else if (score < 55) {
+    label = "At risk";
+    colorCls = "bg-amber-500/15 text-amber-200 ring-amber-500/25";
+  } else if (score < 75) {
+    label = "Stable";
+    colorCls = "bg-sky-500/15 text-sky-200 ring-sky-500/25";
+  } else {
+    label = "Growing";
+    colorCls = "bg-emerald-500/15 text-emerald-200 ring-emerald-500/25";
+  }
+
+  const parts: string[] = [];
+  if (profit < 0) {
+    parts.push("Business is currently operating at a loss.");
+    parts.push("Main priority: reduce the largest costs and protect margin.");
+  } else {
+    parts.push("Business is profitable.");
+    if (margin < 10) parts.push("However, margin is thin — small cost increases can flip profit.");
+    else parts.push("Margin looks healthy — you can scale the best-performing channels.");
+  }
+  if (k.topProduct !== "N/A") parts.push(`Top product: "${k.topProduct}" (focus inventory & promotion).`);
+
+  return {
+    score,
+    label,
+    colorCls,
+    summary: parts.join(" "),
+    drivers: drivers.slice(0, 4),
+  };
+}
+
 async function parseCsvFile(file: File): Promise<ParsedData> {
   const parsedCsv = await new Promise<ParsedData>((resolve, reject) => {
     Papa.parse(file, {
@@ -190,10 +332,6 @@ async function parseExcelFile(file: File): Promise<ParsedData> {
 }
 
 function toSheetsCsvUrl(input: string): string {
-  // accepts:
-  // - full sheets url: https://docs.google.com/spreadsheets/d/<ID>/edit#gid=0
-  // - already export url: .../export?format=csv&gid=0
-  // - raw id
   const s = input.trim();
   if (!s) return "";
 
@@ -202,12 +340,121 @@ function toSheetsCsvUrl(input: string): string {
   const m = s.match(/\/d\/([a-zA-Z0-9-_]+)/);
   const id = m?.[1] || (s.includes("/") ? "" : s);
 
-  // best-effort gid extraction
   const gidMatch = s.match(/[?#&]gid=(\d+)/);
   const gid = gidMatch?.[1] || "0";
 
   if (!id) return "";
   return `https://docs.google.com/spreadsheets/d/${id}/export?format=csv&gid=${gid}`;
+}
+
+function buildDemoData(kind: "loss" | "growth"): ParsedData {
+  // 60 days synthetic dataset
+  const rows: Record<string, any>[] = [];
+  const start = new Date();
+  start.setDate(start.getDate() - 60);
+
+  const products = ["Latte", "Espresso", "Cappuccino", "Croissant", "Sandwich"];
+  let baseRevenue = kind === "growth" ? 120 : 90;
+  let baseMarketing = kind === "growth" ? 8 : 18;
+  let baseRent = 25;
+  let baseSalary = kind === "growth" ? 35 : 45;
+  let baseCOGS = kind === "growth" ? 35 : 48;
+
+  for (let i = 0; i < 60; i++) {
+    const d = new Date(start);
+    d.setDate(start.getDate() + i);
+
+    // simulate trend
+    const trend = kind === "growth" ? 1 + i * 0.01 : 1 - i * 0.005;
+    const noise = 0.85 + Math.random() * 0.3;
+
+    const revenue = Math.max(10, baseRevenue * trend * noise);
+    const cogs = Math.max(1, baseCOGS * trend * (0.9 + Math.random() * 0.25));
+    const marketing = Math.max(1, baseMarketing * (0.8 + Math.random() * 0.5));
+    const rent = baseRent; // flat
+    const salary = Math.max(1, baseSalary * (0.95 + Math.random() * 0.1));
+
+    const product = products[Math.floor(Math.random() * products.length)];
+
+    rows.push({
+      Date: d.toISOString().slice(0, 10),
+      Product: product,
+      Revenue: revenue.toFixed(2),
+      COGS: cogs.toFixed(2),
+      Marketing: marketing.toFixed(2),
+      Rent: rent.toFixed(2),
+      Salary: salary.toFixed(2),
+    });
+  }
+
+  return {
+    columns: ["Date", "Product", "Revenue", "COGS", "Marketing", "Rent", "Salary"],
+    rows,
+  };
+}
+
+function groupTrend(params: {
+  rows: Record<string, any>[];
+  dateCol: string;
+  revenueCol: string;
+  costCols: string[];
+}): TrendPoint[] {
+  const { rows, dateCol, revenueCol, costCols } = params;
+  if (!dateCol || !revenueCol || !rows.length) return [];
+
+  const map = new Map<string, { revenue: number; cost: number }>();
+
+  for (const r of rows) {
+    const dt = tryParseDate(r[dateCol]);
+    if (!dt) continue;
+
+    // bucket by YYYY-MM-DD
+    const key = dt.toISOString().slice(0, 10);
+
+    const rev = parseNumber(r[revenueCol]);
+    let cost = 0;
+    for (const c of costCols) cost += parseNumber(r[c]);
+
+    const prev = map.get(key) || { revenue: 0, cost: 0 };
+    prev.revenue += rev;
+    prev.cost += cost;
+    map.set(key, prev);
+  }
+
+  const keys = Array.from(map.keys()).sort();
+  const out: TrendPoint[] = keys.map((k) => {
+    const v = map.get(k)!;
+    return {
+      label: k,
+      revenue: v.revenue,
+      cost: v.cost,
+      profit: v.revenue - v.cost,
+    };
+  });
+
+  // limit to last 30 points to keep UI fast
+  return out.slice(Math.max(0, out.length - 30));
+}
+
+function svgLinePath(values: number[], w: number, h: number, padding = 8) {
+  if (!values.length) return "";
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min || 1;
+
+  const xStep = (w - padding * 2) / Math.max(1, values.length - 1);
+
+  const pts = values.map((v, i) => {
+    const x = padding + i * xStep;
+    const y = padding + (1 - (v - min) / span) * (h - padding * 2);
+    return { x, y };
+  });
+
+  let d = `M ${pts[0].x.toFixed(2)} ${pts[0].y.toFixed(2)}`;
+  for (let i = 1; i < pts.length; i++) {
+    d += ` L ${pts[i].x.toFixed(2)} ${pts[i].y.toFixed(2)}`;
+  }
+  return d;
 }
 
 export default function DashboardPage() {
@@ -218,28 +465,50 @@ export default function DashboardPage() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
-  // mapping selections
+  // mapping
   const [revenueCol, setRevenueCol] = useState<string>("");
   const [costCols, setCostCols] = useState<string[]>([]);
   const [productCol, setProductCol] = useState<string>("");
+  const [dateCol, setDateCol] = useState<string>("");
 
   // UI
   const [dragOver, setDragOver] = useState(false);
   const fileRef = useRef<HTMLInputElement | null>(null);
 
-  // Google Sheets input
+  // Google Sheets
   const [sheetsInput, setSheetsInput] = useState("");
   const [sheetsHint, setSheetsHint] = useState("");
 
+  // load saved mapping per “source”
+  useEffect(() => {
+    if (!parsed || !fileName) return;
+    const key = `mapping:${fileName}`;
+    const raw = localStorage.getItem(key);
+    if (!raw) return;
+    try {
+      const m = JSON.parse(raw);
+      if (m?.revenueCol) setRevenueCol(m.revenueCol);
+      if (Array.isArray(m?.costCols)) setCostCols(m.costCols);
+      if (m?.productCol != null) setProductCol(m.productCol);
+      if (m?.dateCol != null) setDateCol(m.dateCol);
+    } catch {}
+  }, [parsed, fileName]);
+
+  useEffect(() => {
+    if (!fileName) return;
+    const key = `mapping:${fileName}`;
+    const payload = JSON.stringify({ revenueCol, costCols, productCol, dateCol });
+    try {
+      localStorage.setItem(key, payload);
+    } catch {}
+  }, [fileName, revenueCol, costCols, productCol, dateCol]);
+
   const kpis = useMemo(() => {
     if (!parsed) return null;
-    return computeKpis({
-      rows: parsed.rows,
-      revenueCol,
-      costCols,
-      productCol,
-    });
+    return computeKpis({ rows: parsed.rows, revenueCol, costCols, productCol });
   }, [parsed, revenueCol, costCols, productCol]);
+
+  const health = useMemo(() => (kpis ? computeHealth(kpis) : null), [kpis]);
 
   const statusBadge = useMemo(() => {
     if (!kpis) return { label: "No data", cls: "bg-white/5 text-zinc-300 ring-white/10" };
@@ -247,17 +516,49 @@ export default function DashboardPage() {
     return { label: "Profitable", cls: "bg-emerald-500/15 text-emerald-200 ring-emerald-500/25" };
   }, [kpis]);
 
+  const trend = useMemo(() => {
+    if (!parsed || !dateCol || !revenueCol) return [];
+    return groupTrend({ rows: parsed.rows, dateCol, revenueCol, costCols });
+  }, [parsed, dateCol, revenueCol, costCols]);
+
+  const costBreakdown = useMemo(() => {
+    if (!parsed || !costCols.length) return [];
+    const sums = costCols.map((c) => {
+      let s = 0;
+      for (const r of parsed.rows) s += parseNumber(r[c]);
+      return { col: c, value: s };
+    });
+    sums.sort((a, b) => b.value - a.value);
+    return sums;
+  }, [parsed, costCols]);
+
   function applyAutoMapping(columns: string[]) {
     const suggestedRevenue =
       suggestColumn(columns, ["revenue", "sales", "amount", "total", "price", "value", "ordertotal", "net", "income"]) || "";
+
     const suggestedCost =
-      suggestColumn(columns, ["cost", "expense", "expenses", "cogs", "spend", "fees", "shipping", "delivery", "tax", "rent", "salary", "marketing"]) || "";
-    const suggestedProduct =
-      suggestColumn(columns, ["product", "item", "name", "sku", "category"]) || "";
+      suggestColumn(columns, [
+        "cost",
+        "expense",
+        "expenses",
+        "cogs",
+        "spend",
+        "fees",
+        "shipping",
+        "delivery",
+        "tax",
+        "rent",
+        "salary",
+        "marketing",
+      ]) || "";
+
+    const suggestedProduct = suggestColumn(columns, ["product", "item", "name", "sku", "category"]) || "";
+    const suggestedDate = suggestColumn(columns, ["date", "day", "timestamp", "createdat", "orderdate"]) || "";
 
     setRevenueCol(suggestedRevenue);
     setCostCols(suggestedCost ? [suggestedCost] : []);
     setProductCol(suggestedProduct);
+    setDateCol(suggestedDate);
   }
 
   async function loadParsedData(name: string, data: ParsedData) {
@@ -327,14 +628,24 @@ export default function DashboardPage() {
     setCostCols((prev) => (prev.includes(col) ? prev.filter((x) => x !== col) : [...prev, col]));
   }
 
+  function loadDemo(kind: "loss" | "growth") {
+    setError("");
+    setLoading(false);
+    const d = buildDemoData(kind);
+    loadParsedData(kind === "loss" ? "demo_loss.csv" : "demo_growth.csv", d);
+  }
+
   function exportReport() {
     if (!parsed || !kpis) return;
 
     const payload = {
       generatedAt: new Date().toISOString(),
       source: fileName || "unknown",
-      mapping: { revenueCol, costCols, productCol },
+      mapping: { dateCol, revenueCol, costCols, productCol },
       kpis,
+      health,
+      trend,
+      costBreakdown,
       sampleRows: parsed.rows.slice(0, 10),
       columns: parsed.columns,
     };
@@ -358,17 +669,18 @@ export default function DashboardPage() {
     window.location.href = "/login";
   }
 
+  const trendRevenue = trend.map((p) => p.revenue);
+  const trendProfit = trend.map((p) => p.profit);
+
   return (
     <div className="min-h-screen bg-[#070713] text-zinc-100">
-      {/* Ambient background */}
       <div className="pointer-events-none fixed inset-0 overflow-hidden">
         <div className="absolute -top-40 left-1/2 h-[720px] w-[720px] -translate-x-1/2 rounded-full bg-indigo-500/15 blur-3xl" />
         <div className="absolute top-40 -left-40 h-[560px] w-[560px] rounded-full bg-cyan-500/10 blur-3xl" />
         <div className="absolute -bottom-40 right-0 h-[720px] w-[720px] rounded-full bg-fuchsia-500/10 blur-3xl" />
-        <div className="absolute inset-0 opacity-[0.08] [background-image:linear-gradient(to_right,white_1px,transparent_1px),linear_gradient(to_bottom,white_1px,transparent_1px)] [background-size:72px_72px]" />
+        <div className="absolute inset-0 opacity-[0.08] [background-image:linear-gradient(to_right,white_1px,transparent_1px),linear-gradient(to_bottom,white_1px,transparent_1px)] [background-size:72px_72px]" />
       </div>
 
-      {/* Header */}
       <div className="sticky top-0 z-40 border-b border-white/10 bg-[#070713]/60 backdrop-blur-xl">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
           <div>
@@ -385,10 +697,7 @@ export default function DashboardPage() {
             >
               Export report
             </button>
-            <button
-              onClick={logout}
-              className="rounded-full bg-white/10 px-3 py-2 text-xs ring-1 ring-white/10 hover:bg-white/5"
-            >
+            <button onClick={logout} className="rounded-full bg-white/10 px-3 py-2 text-xs ring-1 ring-white/10 hover:bg-white/5">
               Logout
             </button>
           </div>
@@ -396,6 +705,27 @@ export default function DashboardPage() {
       </div>
 
       <div className="mx-auto max-w-6xl px-6 py-8">
+        {/* WOW demo buttons */}
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <div className="text-xs text-zinc-400">
+            Tip for defense: click <span className="text-zinc-200">Demo Loss</span> / <span className="text-zinc-200">Demo Growth</span> — instant story.
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={() => loadDemo("loss")}
+              className="rounded-full bg-rose-500/15 px-4 py-2 text-xs text-rose-200 ring-1 ring-rose-500/25 hover:bg-rose-500/20"
+            >
+              Demo Loss ↘
+            </button>
+            <button
+              onClick={() => loadDemo("growth")}
+              className="rounded-full bg-emerald-500/15 px-4 py-2 text-xs text-emerald-200 ring-1 ring-emerald-500/25 hover:bg-emerald-500/20"
+            >
+              Demo Growth ↗
+            </button>
+          </div>
+        </div>
+
         {/* Tabs */}
         <div className="mb-4 flex flex-wrap gap-2">
           <button
@@ -418,7 +748,6 @@ export default function DashboardPage() {
           </button>
         </div>
 
-        {/* Panels */}
         <div className="rounded-3xl bg-white/[0.06] p-6 ring-1 ring-white/10">
           {activeTab === "file" ? (
             <>
@@ -430,23 +759,13 @@ export default function DashboardPage() {
                   </div>
                 </div>
 
-                <button
-                  onClick={() => fileRef.current?.click()}
-                  className="rounded-full bg-white/10 px-4 py-2 text-xs ring-1 ring-white/10 hover:bg-white/5"
-                >
+                <button onClick={() => fileRef.current?.click()} className="rounded-full bg-white/10 px-4 py-2 text-xs ring-1 ring-white/10 hover:bg-white/5">
                   Choose file
                 </button>
 
-                <input
-                  ref={fileRef}
-                  type="file"
-                  accept=".csv,.xlsx,.xls"
-                  className="hidden"
-                  onChange={(e) => handleFile(e.target.files?.[0])}
-                />
+                <input ref={fileRef} type="file" accept=".csv,.xlsx,.xls" className="hidden" onChange={(e) => handleFile(e.target.files?.[0])} />
               </div>
 
-              {/* Dropzone */}
               <div
                 onDragEnter={(e) => {
                   e.preventDefault();
@@ -477,9 +796,7 @@ export default function DashboardPage() {
               >
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                   <div>
-                    <div className="text-sm text-zinc-200">
-                      {loading ? "Parsing..." : parsed ? "File loaded" : "Drop your file here"}
-                    </div>
+                    <div className="text-sm text-zinc-200">{loading ? "Parsing..." : parsed ? "File loaded" : "Drop your file here"}</div>
                     <div className="text-xs text-zinc-400">
                       {parsed ? (
                         <>
@@ -492,9 +809,7 @@ export default function DashboardPage() {
                       )}
                     </div>
                   </div>
-                  <div className={clsx("text-xs", dragOver ? "text-indigo-200" : "text-zinc-400")}>
-                    {dragOver ? "Release to upload" : "CSV / Excel"}
-                  </div>
+                  <div className={clsx("text-xs", dragOver ? "text-indigo-200" : "text-zinc-400")}>{dragOver ? "Release to upload" : "CSV / Excel"}</div>
                 </div>
               </div>
             </>
@@ -534,19 +849,30 @@ export default function DashboardPage() {
           )}
 
           {error && (
-            <div className="mt-4 rounded-2xl bg-rose-500/10 p-3 text-sm text-rose-200 ring-1 ring-rose-500/20">
-              {error}
-            </div>
+            <div className="mt-4 rounded-2xl bg-rose-500/10 p-3 text-sm text-rose-200 ring-1 ring-rose-500/20">{error}</div>
           )}
 
-          {/* Mapping + Preview */}
           {parsed && (
             <div className="mt-6 grid gap-4 lg:grid-cols-2">
               <div className="rounded-2xl bg-black/30 p-5 ring-1 ring-white/10">
                 <div className="text-sm font-semibold">Column mapping</div>
-                <div className="mt-1 text-xs text-zinc-400">Pick revenue + costs (1+), product optional.</div>
+                <div className="mt-1 text-xs text-zinc-400">Revenue + costs (1+) + date (for trend) + product optional.</div>
 
                 <div className="mt-4 grid gap-3">
+                  <div>
+                    <div className="text-xs text-zinc-300">Date (optional, enables trend)</div>
+                    <select
+                      value={dateCol}
+                      onChange={(e) => setDateCol(e.target.value)}
+                      className="mt-1 w-full rounded-xl bg-black/40 p-3 text-sm text-zinc-100 ring-1 ring-white/10 outline-none focus:ring-indigo-500/40"
+                    >
+                      <option value="">— None —</option>
+                      {parsed.columns.map((c) => (
+                        <option key={c} value={c}>{c}</option>
+                      ))}
+                    </select>
+                  </div>
+
                   <div>
                     <div className="text-xs text-zinc-300">Revenue (required)</div>
                     <select
@@ -556,9 +882,7 @@ export default function DashboardPage() {
                     >
                       <option value="">— Select —</option>
                       {parsed.columns.map((c) => (
-                        <option key={c} value={c}>
-                          {c}
-                        </option>
+                        <option key={c} value={c}>{c}</option>
                       ))}
                     </select>
                   </div>
@@ -589,15 +913,13 @@ export default function DashboardPage() {
                     >
                       <option value="">— None —</option>
                       {parsed.columns.map((c) => (
-                        <option key={c} value={c}>
-                          {c}
-                        </option>
+                        <option key={c} value={c}>{c}</option>
                       ))}
                     </select>
                   </div>
 
                   <div className="text-xs text-zinc-400">
-                    Tip: set revenue & at least one cost column for realistic profit/margin.
+                    WOW: mapping сохраняется автоматически (localStorage) для этого источника данных.
                   </div>
                 </div>
               </div>
@@ -611,9 +933,7 @@ export default function DashboardPage() {
                     <thead className="bg-white/5 text-zinc-300">
                       <tr>
                         {parsed.columns.slice(0, 8).map((c) => (
-                          <th key={c} className="px-3 py-2 whitespace-nowrap">
-                            {c}
-                          </th>
+                          <th key={c} className="px-3 py-2 whitespace-nowrap">{c}</th>
                         ))}
                       </tr>
                     </thead>
@@ -621,20 +941,23 @@ export default function DashboardPage() {
                       {parsed.rows.slice(0, 8).map((r, idx) => (
                         <tr key={idx} className="border-t border-white/10">
                           {parsed.columns.slice(0, 8).map((c) => (
-                            <td key={c} className="px-3 py-2 whitespace-nowrap">
-                              {String(r[c] ?? "")}
-                            </td>
+                            <td key={c} className="px-3 py-2 whitespace-nowrap">{String(r[c] ?? "")}</td>
                           ))}
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
+
+                {!!fileName && (
+                  <div className="mt-3 text-xs text-zinc-500">
+                    Source: <span className="text-zinc-200">{fileName}</span>
+                  </div>
+                )}
               </div>
             </div>
           )}
 
-          {/* KPI + Insights */}
           {kpis && (
             <>
               {kpis.warnings.length > 0 && (
@@ -656,6 +979,97 @@ export default function DashboardPage() {
                 <KpiCard title="Orders" value={String(kpis.orders)} hint="Rows in dataset" />
                 <KpiCard title="Avg order" value={money(kpis.avgOrder)} hint="Revenue / Orders" />
               </div>
+
+              {health && (
+                <div className="mt-6 rounded-3xl bg-white/[0.06] p-6 ring-1 ring-white/10">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold">Business Health</div>
+                      <div className="mt-1 text-xs text-zinc-400">Simple scoring model (great for teacher demo).</div>
+                    </div>
+
+                    <span className={clsx("rounded-full px-3 py-1 text-xs ring-1", health.colorCls)}>
+                      {health.label} • {health.score}/100
+                    </span>
+                  </div>
+
+                  <div className="mt-4 text-sm text-zinc-200">{health.summary}</div>
+
+                  <div className="mt-4 grid gap-2 md:grid-cols-2">
+                    {health.drivers.map((d) => (
+                      <div key={d} className="rounded-2xl bg-black/30 p-3 text-xs text-zinc-200 ring-1 ring-white/10">
+                        {d}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* WOW: Trend */}
+              {dateCol && trend.length >= 5 && (
+                <div className="mt-6 grid gap-3 lg:grid-cols-2">
+                  <div className="rounded-2xl bg-black/30 p-5 ring-1 ring-white/10">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-semibold">Revenue trend (last {trend.length} days)</div>
+                        <div className="mt-1 text-xs text-zinc-400">Auto-built from Date + Revenue.</div>
+                      </div>
+                      <span className="rounded-full bg-white/5 px-2.5 py-1 text-[11px] text-zinc-300 ring-1 ring-white/10">
+                        WOW Chart
+                      </span>
+                    </div>
+
+                    <div className="mt-4 rounded-2xl bg-black/20 p-3 ring-1 ring-white/10">
+                      <svg width="100%" viewBox="0 0 520 140" className="block">
+                        <path d={svgLinePath(trendRevenue, 520, 140)} fill="none" stroke="currentColor" strokeWidth="2" opacity="0.9" />
+                      </svg>
+                    </div>
+
+                    <div className="mt-3 text-xs text-zinc-400">
+                      Date column: <span className="text-zinc-200">{dateCol}</span>
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl bg-black/30 p-5 ring-1 ring-white/10">
+                    <div className="text-sm font-semibold">Profit trend</div>
+                    <div className="mt-1 text-xs text-zinc-400">Shows if business is improving or sliding.</div>
+
+                    <div className="mt-4 rounded-2xl bg-black/20 p-3 ring-1 ring-white/10">
+                      <svg width="100%" viewBox="0 0 520 140" className="block">
+                        <path d={svgLinePath(trendProfit, 520, 140)} fill="none" stroke="currentColor" strokeWidth="2" opacity="0.9" />
+                      </svg>
+                    </div>
+
+                    <div className="mt-3 text-xs text-zinc-400">
+                      Tip: teacher любит “динамику”, а не только итоговые KPI.
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* WOW: Cost breakdown */}
+              {costBreakdown.length > 0 && (
+                <div className="mt-6 rounded-2xl bg-black/30 p-5 ring-1 ring-white/10">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold">Cost breakdown</div>
+                      <div className="mt-1 text-xs text-zinc-400">Which costs drive losses the most.</div>
+                    </div>
+                    <span className="rounded-full bg-white/5 px-2.5 py-1 text-[11px] text-zinc-300 ring-1 ring-white/10">
+                      Explainable
+                    </span>
+                  </div>
+
+                  <div className="mt-4 grid gap-2">
+                    {costBreakdown.slice(0, 6).map((c) => (
+                      <div key={c.col} className="flex items-center justify-between rounded-xl bg-black/20 px-3 py-2 ring-1 ring-white/10">
+                        <div className="text-sm text-zinc-200 truncate">{c.col}</div>
+                        <div className="text-sm font-semibold">{money(c.value)}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               <div className="mt-6 grid gap-3 lg:grid-cols-2">
                 <div className="rounded-2xl bg-black/30 p-5 ring-1 ring-white/10">
@@ -688,7 +1102,7 @@ export default function DashboardPage() {
         </div>
 
         <div className="mt-8 text-center text-xs text-zinc-500">
-          MVP • supports CSV/Excel + Google Sheets (public export).
+          MVP • CSV/Excel + Google Sheets (public export) • Demo mode • Trend + Breakdown
         </div>
       </div>
     </div>

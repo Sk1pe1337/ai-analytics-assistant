@@ -57,9 +57,10 @@ function LoginInner() {
       router.replace(redirectTo);
       router.refresh();
 
+      // железный редирект на случай, если навигация не отработает на проде
       setTimeout(() => {
         window.location.href = redirectTo;
-      }, 100);
+      }, 120);
     } catch {
       setError("Network error");
     } finally {
@@ -73,7 +74,6 @@ function LoginInner() {
 
   return (
     <div className="min-h-screen bg-[#070713] text-zinc-100">
-      {/* Background */}
       <div className="pointer-events-none fixed inset-0 overflow-hidden">
         <div className="absolute -top-40 left-1/2 h-[640px] w-[640px] -translate-x-1/2 rounded-full bg-indigo-500/20 blur-3xl" />
         <div className="absolute top-40 -left-40 h-[520px] w-[520px] rounded-full bg-cyan-500/12 blur-3xl" />
@@ -94,16 +94,10 @@ function LoginInner() {
         </Link>
 
         <div className="flex items-center gap-2">
-          <Link
-            href="/pricing"
-            className="rounded-full bg-white/5 px-4 py-2 text-sm text-zinc-200 ring-1 ring-white/10 hover:bg-white/10"
-          >
+          <Link href="/pricing" className="rounded-full bg-white/5 px-4 py-2 text-sm text-zinc-200 ring-1 ring-white/10 hover:bg-white/10">
             Pricing
           </Link>
-          <Link
-            href="/demo"
-            className="rounded-full bg-white/5 px-4 py-2 text-sm text-zinc-200 ring-1 ring-white/10 hover:bg-white/10"
-          >
+          <Link href="/demo" className="rounded-full bg-white/5 px-4 py-2 text-sm text-zinc-200 ring-1 ring-white/10 hover:bg-white/10">
             Demo script
           </Link>
         </div>
@@ -167,22 +161,16 @@ function LoginInner() {
               </button>
 
               <div className="text-xs text-zinc-400">
-                Redirect after login: <span className="text-zinc-200">{redirectTo}</span>
+                Redirect after login: <span className="text-zinc-200 break-all">{redirectTo}</span>
               </div>
             </div>
 
             <div className="mt-5 flex flex-wrap items-center justify-between gap-3 text-sm">
-              <Link
-                href="/"
-                className="rounded-xl bg-white/10 px-4 py-2 text-zinc-200 ring-1 ring-white/10 hover:bg-white/5"
-              >
+              <Link href="/" className="rounded-xl bg-white/10 px-4 py-2 text-zinc-200 ring-1 ring-white/10 hover:bg-white/5">
                 Back to landing
               </Link>
 
-              <Link
-                href="/register"
-                className="rounded-xl bg-white/10 px-4 py-2 text-zinc-200 ring-1 ring-white/10 hover:bg-white/5"
-              >
+              <Link href="/register" className="rounded-xl bg-white/10 px-4 py-2 text-zinc-200 ring-1 ring-white/10 hover:bg-white/5">
                 Create account
               </Link>
             </div>
@@ -201,7 +189,9 @@ function LoginInner() {
 
 export default function LoginPage() {
   return (
-    <Suspense fallback={<div className="min-h-screen bg-[#070713] text-zinc-100 grid place-items-center">Loading…</div>}>
+    <Suspense
+      fallback={<div className="min-h-screen bg-[#070713] text-zinc-100 grid place-items-center">Loading…</div>}
+    >
       <LoginInner />
     </Suspense>
   );
