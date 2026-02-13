@@ -46,8 +46,26 @@ export async function POST(req: Request) {
     });
 
     return res;
-  } catch (e) {
+    } catch (e: any) {
     console.error("REGISTER_ERROR", e);
-    return NextResponse.json({ error: "Server error" }, { status: 500 });
+
+    // Частые кейсы:
+    if (e?.code === 11000) {
+      return NextResponse.json({ error: "Email already registered" }, { status: 409 });
+    }
+
+    if (e?.name === "MongoServerSelectionError") {
+      return NextResponse.json({ error: "DB connection failed (check Atlas Network Access / URI)" }, { status: 500 });
+    }
+
+    if (e?.message?.toLowerCase?.().includes("jwt")) {
+      return NextResponse.json({ error: "JWT error (check JWT_SECRET env var)" }, { status: 500 });
+    }
+
+    return NextResponse.json(
+      { error: e?.message ?? "Server error" },
+      { status: 500 }
+    );
   }
+
 }
